@@ -876,7 +876,7 @@ class XtreamApiController extends Controller
                         $seriesCategoryId = (string) $seriesItem->category_id;
                     }
 
-                    $tmdb = $seriesItem->metadata['tmdb'] ?? '';
+                    $tmdb = $seriesItem->metadata['tmdb_id'] ?? $seriesItem->metadata['tmdb'] ?? $seriesItem->tmdb_id ?? '';
                     $lastModified = $seriesItem->last_modified?->timestamp
                         ?? (isset($seriesItem->metadata['last_modified']) ? (int) $seriesItem->metadata['last_modified'] : null);
 
@@ -967,7 +967,7 @@ class XtreamApiController extends Controller
             }
 
             $now = Carbon::now();
-            $tmdb = $seriesItem->metadata['tmdb'] ?? '';
+            $tmdb = $seriesItem->metadata['tmdb_id'] ?? $seriesItem->metadata['tmdb'] ?? $seriesItem->tmdb_id ?? '';
             $lastModified = $seriesItem->last_modified?->timestamp ?? $seriesItem->metadata['last_modified'] ?? null;
 
             $seriesInfo = [
