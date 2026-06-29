@@ -7,6 +7,8 @@ use App\Filament\Resources\AedProfiles\Pages\CreateAedProfile;
 use App\Filament\Resources\AedProfiles\Pages\EditAedProfile;
 use App\Filament\Resources\AedProfiles\Pages\ListAedProfiles;
 use App\Models\AedProfile;
+use App\Models\Channel;
+use App\Models\Group;
 use App\Services\AedExtractorService;
 use App\Services\DateFormatService;
 use App\Traits\HasUserFiltering;
@@ -16,14 +18,20 @@ use Filament\Actions\BulkActionGroup;
 use Filament\Actions\DeleteAction;
 use Filament\Actions\DeleteBulkAction;
 use Filament\Actions\EditAction;
+use Filament\Forms\Components\Hidden;
+use Filament\Forms\Components\Repeater;
+use Filament\Forms\Components\Repeater\TableColumn;
 use Filament\Forms\Components\Select;
 use Filament\Forms\Components\Textarea;
 use Filament\Forms\Components\TextInput;
+use Filament\Infolists\Components\TextEntry;
 use Filament\Notifications\Notification;
 use Filament\Resources\Resource;
 use Filament\Schemas\Components\Actions;
 use Filament\Schemas\Components\Grid;
 use Filament\Schemas\Components\Section;
+use Filament\Schemas\Components\Utilities\Get;
+use Filament\Schemas\Components\Utilities\Set;
 use Filament\Schemas\Schema;
 use Filament\Tables\Columns\TextColumn;
 use Filament\Tables\Enums\RecordActionsPosition;
@@ -75,17 +83,14 @@ class AedProfileResource extends Resource implements CopilotResource
     public static function getForm(): array
     {
         return [
-            Section::make(__('Profile'))
-                ->description(__('Name this AED profile so it can be reused across channels and groups.'))
-                ->schema([
-                    TextInput::make('name')
-                        ->label(__('Profile Name'))
-                        ->required()
-                        ->maxLength(255)
-                        ->placeholder(__('e.g. DAZN PPV')),
-                ]),
+            TextInput::make('name')
+                ->label(__('Profile Name'))
+                ->required()
+                ->maxLength(255)
+                ->placeholder(__('e.g. DAZN PPV')),
 
             Section::make(__('Source Extraction'))
+                ->compact()
                 ->description(__('Define regex patterns to extract event data from the channel title. Capture group 1 is used when present; otherwise the full match.'))
                 ->schema([
                     Grid::make(2)->schema([
@@ -143,10 +148,10 @@ class AedProfileResource extends Resource implements CopilotResource
                             ->maxLength(500)
                             ->placeholder(__('https://example.com/logo.png')),
                     ]),
-                ])
-                ->collapsible(),
+                ]),
 
             Section::make(__('Output Format'))
+                ->compact()
                 ->description(__('Define how the extracted data is formatted in the generated EPG programme.'))
                 ->schema([
                     Grid::make(2)->schema([
@@ -154,7 +159,7 @@ class AedProfileResource extends Resource implements CopilotResource
                             ->label(__('Output Timezone'))
                             ->options(fn () => collect(timezone_identifiers_list())->mapWithKeys(fn ($tz) => [$tz => $tz]))
                             ->searchable()
-                            ->default('UTC'),
+                            ->default(fn () => config('dev.timezone') ?: 'UTC'),
 
                         TextInput::make('event_duration_minutes')
                             ->label(__('Event Duration (minutes)'))
@@ -205,82 +210,203 @@ class AedProfileResource extends Resource implements CopilotResource
                             ->placeholder(__('Sports'))
                             ->maxLength(100),
                     ]),
-                ])
-                ->collapsible(),
+                ]),
 
-            Section::make(__('Test Extraction'))
-                ->description(__('Paste a sample channel title to verify your regex patterns.'))
-                ->schema([
-                    Textarea::make('_test_title')
-                        ->label(__('Sample Channel Title'))
-                        ->placeholder(__('PPV 1: Tommy Fury vs. Eddie Hall [DAZN] (06.13 13:00 ET / 18:00 BST)'))
-                        ->rows(2)
-                        ->dehydrated(false),
+            Actions::make([
+                Action::make('test_extraction')
+                    ->label(__('Test Extraction'))
+                    ->icon('heroicon-o-beaker')
+                    ->color('gray')
+                    ->slideOver()
+                    ->modalWidth('2xl')
+                    ->modalHeading(__('Test Extraction'))
+                    ->modalDescription(__('Select a group or channel to load sample titles, then run the test to see extraction results inline.'))
+                    ->modalSubmitAction(false)
+                    ->modalCancelActionLabel(__('Close'))
+                    ->schema(function (Get $get): array {
+                        return [
+                            // Seed hidden fields from the parent form so the inner Run Test action can read them
+                            Hidden::make('_title_regex')->default($get('title_regex')),
+                            Hidden::make('_time_regex')->default($get('time_regex')),
+                            Hidden::make('_time_format')->default($get('time_format')),
+                            Hidden::make('_source_timezone')->default($get('source_timezone') ?? 'UTC'),
+                            Hidden::make('_date_regex')->default($get('date_regex')),
+                            Hidden::make('_date_format')->default($get('date_format')),
+                            Hidden::make('_team_delimiter')->default($get('team_delimiter')),
+                            Hidden::make('_output_timezone')->default($get('output_timezone') ?? 'UTC'),
+                            Hidden::make('_event_duration_minutes')->default($get('event_duration_minutes') ?? 180),
+                            Hidden::make('_title_format')->default($get('title_format') ?? '{title}'),
+                            Hidden::make('_description_format')->default($get('description_format')),
+                            Hidden::make('_no_event_format')->default($get('no_event_format') ?? '{channel}'),
+                            Hidden::make('_pre_event_format')->default($get('pre_event_format') ?? 'Live in {time_until}: {title}'),
+                            Hidden::make('_post_event_format')->default($get('post_event_format') ?? 'Signing Off'),
+                            Hidden::make('tested')->default(false),
+                            Hidden::make('match_count')->default(''),
 
-                    Actions::make([
-                        Action::make('test_extraction')
-                            ->label(__('Test Extraction'))
-                            ->icon('heroicon-o-beaker')
-                            ->color('gray')
-                            ->action(function (array $data, $livewire) {
-                                $sampleTitle = $livewire->data['_test_title'] ?? '';
-                                if (empty($sampleTitle)) {
-                                    Notification::make()
-                                        ->title(__('Please enter a sample channel title first.'))
-                                        ->warning()
-                                        ->send();
+                            Grid::make(2)->schema([
+                                Select::make('group_id')
+                                    ->label(__('Filter by Group'))
+                                    ->placeholder(__('All groups'))
+                                    ->options(fn () => Group::where([
+                                        'type' => 'live',
+                                        'user_id' => auth()->id(),
+                                    ])->get(['name', 'id'])->pluck('name', 'id'))
+                                    ->searchable()
+                                    ->live()
+                                    ->afterStateUpdated(function (Set $set, ?int $state): void {
+                                        $set('channel_id', null);
+                                        if ($state) {
+                                            $titles = auth()->user()->channels()
+                                                ->withoutEagerLoads()
+                                                ->where('group_id', $state)
+                                                ->limit(100)
+                                                ->pluck('title')
+                                                ->filter()
+                                                ->unique()
+                                                ->values();
+                                            $set('samples', $titles->implode("\n"));
+                                            $set('results', []);
+                                            $set('tested', false);
+                                            $set('match_count', '');
+                                        }
+                                    }),
 
-                                    return;
-                                }
+                                Select::make('channel_id')
+                                    ->label(__('Specific Channel'))
+                                    ->placeholder(__('Search channels...'))
+                                    ->searchable()
+                                    ->live()
+                                    ->getSearchResultsUsing(function (string $search, Get $get) {
+                                        $searchLower = strtolower($search);
+                                        $channels = auth()->user()->channels()
+                                            ->withoutEagerLoads()
+                                            ->with('playlist')
+                                            ->when($get('group_id'), fn ($q, $gid) => $q->where('group_id', $gid))
+                                            ->where(function ($query) use ($searchLower) {
+                                                $query->whereRaw('LOWER(title) LIKE ?', ["%{$searchLower}%"])
+                                                    ->orWhereRaw('LOWER(title_custom) LIKE ?', ["%{$searchLower}%"])
+                                                    ->orWhereRaw('LOWER(name) LIKE ?', ["%{$searchLower}%"])
+                                                    ->orWhereRaw('LOWER(name_custom) LIKE ?', ["%{$searchLower}%"])
+                                                    ->orWhereRaw('LOWER(stream_id) LIKE ?', ["%{$searchLower}%"])
+                                                    ->orWhereRaw('LOWER(stream_id_custom) LIKE ?', ["%{$searchLower}%"]);
+                                            })
+                                            ->limit(50)
+                                            ->get();
 
-                                $profile = new AedProfile;
-                                $profile->title_regex = $livewire->data['title_regex'] ?? null;
-                                $profile->time_regex = $livewire->data['time_regex'] ?? null;
-                                $profile->time_format = $livewire->data['time_format'] ?? null;
-                                $profile->source_timezone = $livewire->data['source_timezone'] ?? 'UTC';
-                                $profile->date_regex = $livewire->data['date_regex'] ?? null;
-                                $profile->date_format = $livewire->data['date_format'] ?? null;
-                                $profile->team_delimiter = $livewire->data['team_delimiter'] ?? null;
-                                $profile->output_timezone = $livewire->data['output_timezone'] ?? 'UTC';
-                                $profile->event_duration_minutes = (int) ($livewire->data['event_duration_minutes'] ?? 180);
-                                $profile->title_format = $livewire->data['title_format'] ?? '{title}';
-                                $profile->description_format = $livewire->data['description_format'] ?? null;
-                                $profile->no_event_format = $livewire->data['no_event_format'] ?? '{channel}';
+                                        $options = [];
+                                        foreach ($channels as $channel) {
+                                            $displayTitle = $channel->title_custom ?: $channel->title;
+                                            $playlistName = $channel->getEffectivePlaylist()->name ?? 'Unknown';
+                                            $options[$channel->id] = "{$displayTitle} [{$playlistName}]";
+                                        }
 
-                                $service = app(AedExtractorService::class);
-                                $result = $service->extract($profile, $sampleTitle);
+                                        return $options;
+                                    })
+                                    ->afterStateUpdated(function (Set $set, ?int $state): void {
+                                        if ($state) {
+                                            $channel = Channel::find($state);
+                                            $set('samples', $channel?->title ?? $channel?->name ?? '');
+                                            $set('results', []);
+                                            $set('tested', false);
+                                            $set('match_count', '');
+                                        }
+                                    }),
+                            ]),
 
-                                if ($result === null) {
-                                    Notification::make()
-                                        ->title(__('No match'))
-                                        ->body(__('Title regex did not match the sample. Check your pattern.'))
-                                        ->warning()
-                                        ->send();
+                            Textarea::make('samples')
+                                ->label(__('Sample Titles'))
+                                ->placeholder(__('Select a group or channel above, or paste titles here — one per line'))
+                                ->rows(6)
+                                ->columnSpanFull(),
 
-                                    return;
-                                }
+                            Actions::make([
+                                Action::make('run_test')
+                                    ->label(__('Run Test'))
+                                    ->icon('heroicon-o-play')
+                                    ->color('primary')
+                                    ->action(function (Get $get, Set $set): void {
+                                        $titles = array_values(array_filter(array_map('trim', explode("\n", (string) ($get('samples') ?? '')))));
 
-                                $body = "Title: {$result->title}";
-                                if ($result->description) {
-                                    $body .= "\nDescription: {$result->description}";
-                                }
-                                if ($result->hasTime()) {
-                                    $body .= "\nStart: {$result->start->format('Y-m-d H:i T')}";
-                                    $body .= "\nEnd: {$result->end->format('Y-m-d H:i T')}";
-                                } else {
-                                    $body .= "\nTime: Could not extract (will use repeating dummy slots)";
-                                }
+                                        if (empty($titles)) {
+                                            Notification::make()
+                                                ->title(__('No titles to test'))
+                                                ->body(__('Select a group or channel, or paste titles into the box above.'))
+                                                ->warning()
+                                                ->send();
 
-                                Notification::make()
-                                    ->title(__('Extraction successful'))
-                                    ->body($body)
-                                    ->success()
-                                    ->send();
-                            }),
-                    ]),
-                ])
-                ->collapsible()
-                ->collapsed(),
+                                            return;
+                                        }
+
+                                        $profile = new AedProfile;
+                                        $profile->title_regex = $get('_title_regex');
+                                        $profile->time_regex = $get('_time_regex');
+                                        $profile->time_format = $get('_time_format');
+                                        $profile->source_timezone = $get('_source_timezone') ?? 'UTC';
+                                        $profile->date_regex = $get('_date_regex');
+                                        $profile->date_format = $get('_date_format');
+                                        $profile->team_delimiter = $get('_team_delimiter');
+                                        $profile->output_timezone = $get('_output_timezone') ?? 'UTC';
+                                        $profile->event_duration_minutes = (int) ($get('_event_duration_minutes') ?? 180);
+                                        $profile->title_format = $get('_title_format') ?? '{title}';
+                                        $profile->description_format = $get('_description_format');
+                                        $profile->no_event_format = $get('_no_event_format') ?? '{channel}';
+                                        $profile->pre_event_format = $get('_pre_event_format') ?? 'Live in {time_until}: {title}';
+                                        $profile->post_event_format = $get('_post_event_format') ?? 'Signing Off';
+
+                                        $service = app(AedExtractorService::class);
+                                        $rows = [];
+                                        foreach ($titles as $title) {
+                                            $result = $service->extract($profile, $title);
+                                            $rows[] = [
+                                                'input' => $title,
+                                                'status' => $result ? __('Match') : __('No match'),
+                                                'extracted_title' => $result?->title ?? '',
+                                                'time' => $result?->hasTime()
+                                                    ? $result->start->format('M j g:i A T').' – '.$result->end->format('g:i A')
+                                                    : '',
+                                            ];
+                                        }
+
+                                        $matched = count(array_filter($rows, fn ($r) => $r['status'] === __('Match')));
+                                        $total = count($rows);
+                                        $set('match_count', __("{$matched} of {$total} titles matched"));
+                                        $set('results', $rows);
+                                        $set('tested', true);
+                                    }),
+                            ]),
+
+                            TextEntry::make('match_count_display')
+                                ->label('')
+                                ->state(fn (Get $get): string => (string) ($get('match_count') ?? ''))
+                                ->visible(fn (Get $get): bool => filled($get('match_count')))
+                                ->columnSpanFull(),
+
+                            Repeater::make('results')
+                                ->label('')
+                                ->table([
+                                    TableColumn::make(__('Input'))->width('35%'),
+                                    TableColumn::make(__('Status'))->width('15%'),
+                                    TableColumn::make(__('Extracted Title'))->width('25%'),
+                                    TableColumn::make(__('Time'))->width('25%'),
+                                ])
+                                ->schema([
+                                    TextInput::make('input')->hiddenLabel()->disabled(),
+                                    TextEntry::make('status')
+                                        ->hiddenLabel()
+                                        ->badge()
+                                        ->color(fn (string $state): string => $state === __('Match') ? 'success' : 'gray'),
+                                    TextInput::make('extracted_title')->hiddenLabel()->disabled(),
+                                    TextInput::make('time')->hiddenLabel()->disabled(),
+                                ])
+                                ->default([])
+                                ->addable(false)
+                                ->deletable(false)
+                                ->reorderable(false)
+                                ->visible(fn (Get $get): bool => (bool) $get('tested') && filled($get('match_count')))
+                                ->columnSpanFull(),
+                        ];
+                    }),
+            ]),
         ];
     }
 
