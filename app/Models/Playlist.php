@@ -474,50 +474,6 @@ class Playlist extends Model
         ]);
     }
 
-    /**
-     * Rotate the primary Xtream URL to the next working URL.
-     * Moves the failed URL into fallbacks and promotes the new URL to primary.
-     *
-     * @return string|null The new primary URL, or null if no alternatives exist.
-     */
-    public function rotateXtreamUrl(string $failedUrl): ?string
-    {
-        $allUrls = $this->getOrderedXtreamUrls();
-
-        if (count($allUrls) <= 1) {
-            return null;
-        }
-
-        $failedNormalized = rtrim($failedUrl, '/');
-
-        // Find the next URL after the failed one
-        $failedIndex = array_search($failedNormalized, $allUrls);
-        if ($failedIndex === false) {
-            return null;
-        }
-
-        $nextIndex = ($failedIndex + 1) % count($allUrls);
-        $newPrimary = $allUrls[$nextIndex];
-
-        // Build new fallback list: all URLs except the new primary
-        $newFallbacks = [];
-        foreach ($allUrls as $url) {
-            if ($url !== $newPrimary) {
-                $newFallbacks[] = $url;
-            }
-        }
-
-        // Update the model
-        $config = $this->xtream_config;
-        $config['url'] = $newPrimary;
-        $this->update([
-            'xtream_config' => $config,
-            'xtream_fallback_urls' => $newFallbacks,
-        ]);
-
-        return $newPrimary;
-    }
-
     public function xtreamStatus(): Attribute
     {
         return Attribute::make(
