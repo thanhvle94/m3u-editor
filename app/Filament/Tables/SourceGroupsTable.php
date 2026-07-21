@@ -6,6 +6,7 @@ use App\Models\Group;
 use App\Models\SourceGroup;
 use Filament\Actions\BulkActionGroup;
 use Filament\Tables\Columns\TextColumn;
+use Filament\Tables\Filters\TernaryFilter;
 use Filament\Tables\Table;
 use Illuminate\Database\Eloquent\Builder;
 
@@ -69,7 +70,37 @@ class SourceGroupsTable
                     ->sortable(),
             ])
             ->filters([
-                //
+                TernaryFilter::make('enabled')
+                    ->label(__('Enabled'))
+                    ->placeholder(__('All groups'))
+                    ->trueLabel(__('Enabled only'))
+                    ->falseLabel(__('Disabled only'))
+                    ->queries(
+                        // "Enabled" means the source group has already been imported as a
+                        // Group with enabled=true. Correlate on the same keys used for
+                        // display_name/search above rather than a join, for the same
+                        // reasons: keeps source_groups.* unambiguous and avoids row
+                        // multiplication if a name ever matched more than one Group.
+                        true: fn (Builder $query): Builder => $query->whereExists(
+                            fn ($subQuery) => $subQuery->selectRaw('1')
+                                ->from('groups')
+                                ->whereColumn('groups.name_internal', 'source_groups.name')
+                                ->whereColumn('groups.playlist_id', 'source_groups.playlist_id')
+                                ->whereColumn('groups.type', 'source_groups.type')
+                                ->whereNull('groups.deleted_at')
+                                ->where('groups.enabled', true)
+                        ),
+                        false: fn (Builder $query): Builder => $query->whereNotExists(
+                            fn ($subQuery) => $subQuery->selectRaw('1')
+                                ->from('groups')
+                                ->whereColumn('groups.name_internal', 'source_groups.name')
+                                ->whereColumn('groups.playlist_id', 'source_groups.playlist_id')
+                                ->whereColumn('groups.type', 'source_groups.type')
+                                ->whereNull('groups.deleted_at')
+                                ->where('groups.enabled', true)
+                        ),
+                        blank: fn (Builder $query): Builder => $query,
+                    ),
             ])
             ->paginated([15, 25, 50, 100])
             ->defaultPaginationPageOption(15)
