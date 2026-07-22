@@ -13,7 +13,7 @@ use Illuminate\Database\Eloquent\Builder;
 class SourceCategoriesTable
 {
     use FiltersBySelection;
-    
+
     public static function configure(Table $table): Table
     {
         return $table
